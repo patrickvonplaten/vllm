@@ -38,6 +38,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
@@ -47,13 +48,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class LlamaMLP(nn.Module):
@@ -266,13 +269,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": 0,
-        "inputs_embeds": 0,
-        "intermediate_tensors": 0,
-    })
+@support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -427,7 +424,7 @@ class LlamaModel(nn.Module):
             if not isinstance(self.layers[layer_idx], nn.Identity):
                 layer_self_attn = self.layers[layer_idx].self_attn
 
-            if is_hip():
+            if current_platform.is_rocm():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting
@@ -504,6 +501,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -514,7 +512,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 cache_config,
                                 quant_config,
                                 lora_config=lora_config,
-                                prefix="model")
+                                prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -530,6 +528,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     if not lora_config else
                     lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 self.lm_head = self.lm_head.tie_weights(
@@ -615,3 +614,52 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+class LlamaEmbeddingModel(nn.Module, SupportsPP):
+    """
+    A model that uses Llama with additional embedding functionalities.
+
+    This class encapsulates the LlamaModel and provides an interface for
+    embedding operations and customized pooling functions.
+
+    Attributes:
+        model: An instance of LlamaModel used for forward operations.
+        _pooler: An instance of Pooler used for pooling operations.
+    """
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+
+        self.model = LlamaModel(**kwargs)
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        return self.model(input_ids, positions, kv_caches, attn_metadata,
+                          intermediate_tensors, inputs_embeds)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        self.model.load_weights(weights)
+
+    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
+        self.model.load_kv_cache_scales(quantization_param_path)

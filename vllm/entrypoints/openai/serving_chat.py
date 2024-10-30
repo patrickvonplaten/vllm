@@ -38,7 +38,7 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import iterate_with_cancellation, random_uuid
+from vllm.utils import iterate_with_cancellation
 
 logger = init_logger(__name__)
 
@@ -176,7 +176,7 @@ class OpenAIServingChat(OpenAIServing):
                 "\"auto\" tool choice requires "
                 "--enable-auto-tool-choice and --tool-call-parser to be set")
 
-        request_id = f"chat-{random_uuid()}"
+        request_id = f"chat-{request.request_id}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -236,9 +236,10 @@ class OpenAIServingChat(OpenAIServing):
 
             if isinstance(sampling_params, BeamSearchParams):
                 result_generator = self.engine_client.beam_search(
-                    engine_inputs['prompt_token_ids'],
-                    request_id,
-                    sampling_params,
+                    prompt=engine_inputs,
+                    model_config=self.model_config,
+                    request_id=request_id,
+                    params=sampling_params,
                 )
             else:
                 result_generator = self.engine_client.generate(
@@ -324,7 +325,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_parsers = [None] * num_choices
         except RuntimeError as e:
-            logger.error("Error in tool parser creation: %s", e)
+            logger.exception("Error in tool parser creation.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
             yield "data: [DONE]\n\n"
@@ -384,7 +385,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo or request.continue_final_message:
-                        last_msg_content: str = ""
+                        last_msg_content: Union[str, List[Dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -435,6 +436,12 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = None
 
                     delta_text = output.text
+
+                    if not delta_text and not output.token_ids and \
+                        not previous_num_tokens[i]:
+                        # Chunked prefill case, don't return empty chunks
+                        continue
+
                     delta_message: Optional[DeltaMessage]
 
                     # handle streaming deltas for tools with named tool_choice
@@ -594,7 +601,7 @@ class OpenAIServingChat(OpenAIServing):
 
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            logger.error("error in chat completion stream generator: %s", e)
+            logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
@@ -681,7 +688,7 @@ class OpenAIServingChat(OpenAIServing):
                 try:
                     tool_parser = self.tool_parser(tokenizer)
                 except RuntimeError as e:
-                    logger.error("Error in tool parser creation: %s", e)
+                    logger.exception("Error in tool parser creation.")
                     return self.create_error_response(str(e))
 
                 tool_call_info = tool_parser.extract_tool_calls(
@@ -718,10 +725,13 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo or request.continue_final_message:
-            last_msg_content = ""
+            last_msg_content: Union[str, List[Dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
+            if isinstance(last_msg_content, list):
+                last_msg_content = "\n".join(msg['text']
+                                             for msg in last_msg_content)
 
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content
