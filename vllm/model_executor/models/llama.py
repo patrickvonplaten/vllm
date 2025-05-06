@@ -439,6 +439,7 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                assert name in params_dict, (name, params_dict.keys())
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -468,6 +469,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "qscale_act": "input_scale",
         "qscale_weight": "weight_scale",
         "kv_fake_quantizer.qscale_act": "kv_scale",
+        "q_fake_quantizer.qscale_act": "attn.q_scale",
+        "k_fake_quantizer.qscale_act": "k_scale",
+        "v_fake_quantizer.qscale_act": "v_scale",
         "wq": "q_proj",
         "wk": "k_proj",
         "wv": "v_proj",

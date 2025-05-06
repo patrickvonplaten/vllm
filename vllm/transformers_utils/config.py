@@ -669,7 +669,6 @@ def remap_yarn_args(config: dict) -> dict:
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
-    import ipdb; ipdb.set_trace()
     return config
 
 def load_params_config(model: Union[str, Path], revision: Optional[str],
