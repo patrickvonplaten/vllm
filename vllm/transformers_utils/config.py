@@ -647,6 +647,31 @@ def maybe_register_config_serialize_by_value() -> None:
             exc_info=e)
 
 
+def remap_yarn_args(config: dict) -> dict:
+    # Direct remaps: yarn.X -> rope_scaling.Y
+    yarn_config_map = {
+        "factor": "factor",
+        "original_max_position_embeddings":
+        "original_max_position_embeddings",
+        "beta": "beta_fast",
+        "alpha": "beta_slow",
+    }
+    is_deepstral_moe = config.get("moe") is not None and "n_shared_experts" in config
+    yarn_config = config.get("yarn") or {}
+
+    config["rope_scaling"] = {
+        "rope_type": "deepseek_yarn" if is_deepstral_moe else "yarn",
+        "mscale_all_dim": 1,  # We hardcoded this to 1
+    }
+    for old_name, new_name in yarn_config_map.items():
+        if old_name in yarn_config:
+            config["rope_scaling"][new_name] = yarn_config.pop(old_name)
+
+    assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
+
+    import ipdb; ipdb.set_trace()
+    return config
+
 def load_params_config(model: Union[str, Path], revision: Optional[str],
                        **kwargs) -> PretrainedConfig:
     # This function loads a params.json config which
@@ -681,6 +706,9 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
             return config_dict
         else:
             return elem
+
+    if config_dict.get("yarn") is not None:
+        config_dict = remap_yarn_args(config_dict)
 
     config_dict["model_type"] = config_dict.get("model_type", "transformer")
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
