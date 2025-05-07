@@ -182,6 +182,7 @@ class MistralTokenizer(TokenizerBase):
     def __init__(self, tokenizer: "PublicMistralTokenizer") -> None:
         self.mistral = tokenizer
         self.instruct = tokenizer.instruct_tokenizer
+        self.version: int = int(self.instruct.tokenizer.version.value.split("v")[-1].split("m")[0])
 
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
         from mistral_common.tokens.tokenizers.tekken import (
