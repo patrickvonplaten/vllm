@@ -252,6 +252,7 @@ class WhisperAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 attn_type=self.attn_type,
+                per_layer_sliding_window=1500,  # just same sliding window size as LLM for now
             )
 
     def _init_qkv(
@@ -394,7 +395,8 @@ class WhisperEncoderLayer(nn.Module):
         self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
-            attn_type=AttentionType.ENCODER,
+            # attn_type=AttentionType.ENCODER,
+            attn_type=AttentionType.DECODER,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -486,6 +488,60 @@ class WhisperDecoderLayer(nn.Module):
         return hidden_states
 
 
+def pad1d(
+    x: torch.Tensor,
+    paddings: tuple[int, int],
+    mode: str = "constant",
+    value: float = 0.0,
+) -> torch.Tensor:
+    """Tiny wrapper around F.pad, just to allow for reflect padding on small input.
+    If this is the case, we insert extra 0 padding to the right before the reflection happen.
+    """
+    length = x.shape[-1]
+    padding_left, padding_right = paddings
+    assert padding_left >= 0 and padding_right >= 0, (padding_left, padding_right)
+    if mode == "reflect":
+        max_pad = max(padding_left, padding_right)
+        extra_pad = 0
+        if length <= max_pad:
+            extra_pad = max_pad - length + 1
+            x = F.pad(x, (0, extra_pad))
+        padded = F.pad(x, paddings, mode, value)
+        end = padded.shape[-1] - extra_pad
+        return padded[..., :end]
+    else:
+        return F.pad(x, paddings, mode, value)
+
+
+class CausalConv1d(nn.Conv1d):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        padding: int = 0,
+        pad_mode: str = "constant",
+        bias: bool = True,
+    ) -> None:
+        super().__init__(in_channels, out_channels, kernel_size, padding=padding, stride=stride, bias=bias)
+        self.pad_mode = pad_mode
+        self._stride = self.stride[0]
+        self._effective_kernel_size = (kernel_size - 1) * self.dilation[0] + 1
+        self._padding_total = self._effective_kernel_size - self._stride
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        n_frames = (
+            x.shape[-1] - self._effective_kernel_size + self._padding_total
+        ) / self._stride + 1
+        target_length = (math.ceil(n_frames) - 1) * self._stride + (
+            self._effective_kernel_size - self._padding_total
+        )
+        extra_padding = target_length - x.shape[-1]
+        x = pad1d(x, (self._padding_total, extra_padding), mode=self.pad_mode)
+        return super().forward(x)
+
+
 class WhisperEncoder(nn.Module):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
@@ -497,8 +553,8 @@ class WhisperEncoder(nn.Module):
         self.max_source_positions = config.max_source_positions
         self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
-        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
+        self.conv1 = CausalConv1d(self.num_mel_bins, embed_dim, stride=1, kernel_size=3)
+        self.conv2 = CausalConv1d(embed_dim, embed_dim, stride=2, kernel_size=3)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(
@@ -508,36 +564,46 @@ class WhisperEncoder(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        maybe_fp32_init_ctx = (
-            set_default_torch_dtype(torch.float32) if init_in_fp32 else nullcontext()
-        )
+        # We got NOPE
+        # maybe_fp32_init_ctx = (
+        #     set_default_torch_dtype(torch.float32) if init_in_fp32 else nullcontext()
+        # )
 
-        with (
-            torch.no_grad(),
-            maybe_fp32_init_ctx,
-        ):
-            self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
-            self.embed_positions.weight.copy_(
-                sinusoids(*self.embed_positions.weight.shape)
-            )
+        # with (
+        #     torch.no_grad(),
+        #     maybe_fp32_init_ctx,
+        # ):
+        #     self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
+        #     self.embed_positions.weight.copy_(
+        #         sinusoids(*self.embed_positions.weight.shape)
+        #     )
 
-    def forward(self, input_features: torch.Tensor | list[torch.Tensor]):
+    def forward_conv(self, input_features: torch.Tensor | list[torch.Tensor]):
         hidden_states = []
         for features in input_features:
             embeds = nn.functional.gelu(self.conv1(features))
             embeds = nn.functional.gelu(self.conv2(embeds))
-            embeds = embeds.transpose(-1, -2)
-            embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
-                embeds.dtype
-            )
+            embeds = embeds.transpose(-1, -2).to(embeds.dtype)
+
+            # embeds = embeds.transpose(-1, -2)
+            # embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
+            #     embeds.dtype
+            # )
             hidden_states.append(embeds)
         hidden_states = torch.cat(hidden_states)
+        # [total_num_chunks, ceil(chunk_size / downsample_factor), hidden_size]
+        return hidden_states
 
+    def forward_layers(self, hidden_states: torch.Tensor) -> torch.Tensor:
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
+
+    def forward(self, input_features: torch.Tensor | list[torch.Tensor]):
+        hidden_states = self.forward_conv(input_features)
+        return self.forward_layers(hidden_states)
 
 
 class WhisperDecoder(nn.Module):

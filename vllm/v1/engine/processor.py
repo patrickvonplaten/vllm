@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict, PlaceholderRange
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -450,7 +450,9 @@ class Processor:
             # Merge and flatten multimodal placeholders, hashes and inputs
             # from dictionaries to lists, and sort them by each item's position
             # in the input sequence.
-            sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
+            # sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
+            sorted_mm_idxs = [('audio', 0)]
+            decoder_mm_positions = {'audio': [PlaceholderRange(offset=0, length=1000)]}
 
             mm_features = []
             for modality, idx in sorted_mm_idxs:

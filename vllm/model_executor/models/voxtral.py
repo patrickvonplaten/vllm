@@ -382,6 +382,23 @@ class VoxtralForConditionalGeneration(
             tower_model=["whisper_encoder"],
         )
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        # Multi-modal token ID may exceed vocab size
+        handle_oov_mm_token: bool = True,
+    ) -> torch.Tensor:
+        """Pass post-conv embeddings directly as input"""
+        assert multimodal_embeddings is not None
+        assert len(multimodal_embeddings) > 0
+        mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+        print(f"{mm_embeds_flat.shape=}")
+        print(f"{mm_embeds_flat.shape=}")
+        return mm_embeds_flat
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -393,8 +410,29 @@ class VoxtralForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
+        assert inputs_embeds is not None
+        assert input_ids is not None
+        print(f"{inputs_embeds.shape=}")
+        inputs_embeds = inputs_embeds.view(
+            inputs_embeds.shape[0] * 4, inputs_embeds.shape[1] // 4
+        )
+        audio_hidden_states = self.whisper_encoder.whisper_encoder.forward_layers(
+            inputs_embeds
+        )
+        num_tokens, audio_hidden_size = audio_hidden_states.shape
+        assert num_tokens % self.downsample_factor == 0
+        audio_hidden_states = audio_hidden_states.reshape(
+            num_tokens // self.downsample_factor,
+            audio_hidden_size * self.downsample_factor,
+        )
+        audio_text_embeds = self.audio_language_adapter(audio_hidden_states)
+        text_embeds = self.language_model.get_input_embeddings(input_ids)
+
+        # SUM pooling
+        lm_inputs_embeds = audio_text_embeds + text_embeds
+
         hidden_states = self.language_model.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
+            input_ids, positions, intermediate_tensors, inputs_embeds=lm_inputs_embeds
         )
 
         return hidden_states
@@ -402,34 +440,45 @@ class VoxtralForConditionalGeneration(
     def get_multimodal_embeddings(
         self, **kwargs
     ) -> list[torch.Tensor] | torch.Tensor | tuple[torch.Tensor, ...] | None:
+        """Transform audio waveforms -> initial whisper post-conv embeddings"""
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
         if audio_inputs is None:
             return None
 
-        audio_embeddings = self.whisper_encoder(audio_inputs)
+        print(f"{[audio.shape for audio in audio_inputs]=}")
+        # list[num_mel_bins, num_10ms_frames]
+        mel_features = [
+            self.whisper_encoder.compute_whisper_melspec(audio).to(
+                self.whisper_encoder.dtype
+            )
+            for audio in audio_inputs
+        ]
+        seq_lens = [mel.shape[1] for mel in mel_features]
 
-        for i, audio_embedding in enumerate(audio_embeddings):
-            seq_len, dim = audio_embedding.shape
-            # Pad such that seq_len is divisible by downsample_factor
-            target_seq_len = self.downsample_factor * math.ceil(
-                seq_len / self.downsample_factor
-            )
-            audio_embedding = torch.nn.functional.pad(
-                audio_embedding,
-                (0, 0, 0, target_seq_len - seq_len),
-            )
-            audio_embeddings[i] = audio_embedding.reshape(
-                target_seq_len // self.downsample_factor, dim * self.downsample_factor
-            )
-
-        # Concat, project and resplit
-        audio_embeddings_packed = torch.cat(audio_embeddings, dim=0)
-        audio_embeddings_packed = self.audio_language_adapter(audio_embeddings_packed)
-        audio_embeddings = torch.split(
-            audio_embeddings_packed, [a.shape[0] for a in audio_embeddings], dim=0
+        # [total_num_20ms_frames, hidden_size]
+        audio_embeddings = self.whisper_encoder.whisper_encoder.forward_conv(
+            mel_features
         )
+        print(f"{seq_lens=} {[m.shape for m in mel_features]=}")
 
-        return audio_embeddings
+        audio_embeddings_per_sample = audio_embeddings.split(
+            [s // 2 for s in seq_lens], dim=0
+        )
+        leftovers = [sample.shape[0] % 4 for sample in audio_embeddings_per_sample]
+        audio_embeddings_per_sample = [e[:-leftover] if leftover > 0 else e for e, leftover in zip(audio_embeddings_per_sample, leftovers)]
+
+        print(f"{[e.shape for e in audio_embeddings_per_sample]=}")
+        # set markers
+        # audio_embeddings[0][:, 0] = torch.arange(audio_embeddings[0].shape[0])
+        # pack four items into one
+        # print(f"audio embeds 1: {audio_embeddings[:52].abs().sum(-1)}")
+        # NOTE: Patrick,Andy - the audio embeddings at this point are correct !!!!
+        # HACK - Pack time dimension into hid size to align text and audio seq_len
+        audio_embeddings_per_sample = [
+            e.view(e.shape[0] // 4, e.shape[1] * 4) for e in audio_embeddings_per_sample
+        ]
+        # print(f"audio embeds 2: {audio_embeddings[:13].abs().sum(-1)}")
+        return audio_embeddings_per_sample
 
     def _parse_and_validate_audio_arrays(
         self, **kwargs: object

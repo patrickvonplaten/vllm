@@ -2006,6 +2006,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
         mm_item_counts: Mapping[str, int],
     ) -> None:
+        # We have no placeholders anymore
+        return
         for modality, item_count in mm_item_counts.items():
             placeholders = mm_placeholders.get(modality, [])
 
@@ -2027,7 +2029,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         is_update_applied: bool,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         mm_item_counts = mm_items.get_all_counts()
-        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        # self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
         if is_update_applied:

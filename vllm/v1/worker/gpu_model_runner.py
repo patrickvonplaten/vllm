@@ -298,7 +298,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
-        self.hidden_size = model_config.get_hidden_size()
+        # self.hidden_size = model_config.get_hidden_size()
+        # Hack -- pack 4 whisper hidden states into one to match the number of tokens
+        self.hidden_size = 1280 * 4
         self.attention_chunk_size = model_config.attention_chunk_size
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = model_config.uses_alibi
