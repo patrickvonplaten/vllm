@@ -413,9 +413,22 @@ class VoxtralForConditionalGeneration(
         assert inputs_embeds is not None
         assert input_ids is not None
         print(f"{inputs_embeds.shape=}")
+
+        # NOTE: Nicolo - here we expand [whisper_seq_len // 4, hid_size * 4]
+        # back to [whisper_seq_len, hid_size]
+        # BIG PROBLEM: Whisper_seq_len is 4 x LLM seq_Len
         inputs_embeds = inputs_embeds.view(
             inputs_embeds.shape[0] * 4, inputs_embeds.shape[1] // 4
         )
+
+        # NOTE: Nicolo - we've moved the causal whisper encoder here so that it's k/v cache gets initialized correctly
+        # The causal attention here works but the metadata is messed up. We're getting incorrect results
+        # because we have:
+        # FlashAttentionMetadata(num_actual_tokens=13, max_query_len=13, query_start_loc=tensor([ 0, 13], device='cuda:0', dtype=torch.int32), max_seq_len=13, seq_lens=tensor([13], device='cuda:0', dtype=torch.int32)
+        # BUT
+        # pdb> query.shape
+        # torch.Size([52, 20, 64])
+        # We tried hacking here with get_forward_context & set_forward_context but a bit unsucessful because the attn_metadata.slot_mapping is messed up etc...
         audio_hidden_states = self.whisper_encoder.whisper_encoder.forward_layers(
             inputs_embeds
         )
