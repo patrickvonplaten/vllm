@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
@@ -362,8 +363,12 @@ class VoxtralForConditionalGeneration(
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
+        whisper_vllm_config = copy.deepcopy(vllm_config.with_hf_config(config.audio_config))
+        # make sure k/v allocation correctly pools 4 blocks into 1
+        whisper_vllm_config.cache_config.pool_size = 4
+
         self.whisper_encoder = VoxtralEncoderModel(
-            vllm_config.with_hf_config(config.audio_config),
+            whisper_vllm_config,
             prefix=maybe_prefix(prefix, "whisper_encoder"),
         )
         self.audio_language_adapter = AudioLanguageAdapter(

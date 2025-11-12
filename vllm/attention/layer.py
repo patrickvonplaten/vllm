@@ -462,8 +462,14 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
+
+        # pool size to allow seq_len pooling
+        pool_size = vllm_config.cache_config.pool_size
+
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
+
+        # TODO(Patrick) - add pool_size somehow to attn_module
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
@@ -474,6 +480,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 sliding_window=self.sliding_window,
+                pool_size=pool_size,
             )
         else:
             return FullAttentionSpec(
@@ -481,6 +488,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
+                pool_size=pool_size,
             )
 
 

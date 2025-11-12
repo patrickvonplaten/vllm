@@ -4563,6 +4563,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
                         kernel_block_size,
+                        * kv_cache_spec.pool_size,  # NOTE if we need `pool_size` x tokens per "real" token, we just multiple the block size
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,

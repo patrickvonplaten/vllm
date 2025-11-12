@@ -232,6 +232,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
         self.kv_cache_dtype = kv_cache_spec.dtype
         self.headdim = self.model_config.get_head_size()
+        self.pool_size = kv_cache_spec.pool_size
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
@@ -291,6 +292,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
+
+        if self.pool_size > 1:
+            num_actual_tokens *= self.pool_size
+            max_query_len *= self.pool_size
+            max_seq_len *= self.pool_size
+            query_start_loc *= self.pool_size
+            seq_lens *= self.pool_size
+            seq_lens_cpu *= self.pool_size
+            _start_idx = slot_mapping[0] * self.pool_size
+            _end_idx = (slot_mapping[-1] + 1) * self.pool_size
+            # TODO(Patrick) - is this really always correct ?!
+            # We map prev begin * 4 and end also times 4
+            slot_mapping = torch.arange(
+                _start_idx, _end_idx, device=slot_mapping.device
+            )
 
         # the overhead of the aot schedule is not worth it for spec-decode
         aot_schedule = self.aot_schedule and not fast_build

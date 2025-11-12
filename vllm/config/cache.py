@@ -47,6 +47,9 @@ class CacheConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
     platform."""
+    pool_size: int = Field(default=1, ge=1)
+    """Number of k/v blocks that are continously treated as a single k/v block
+    so that seq_lens can be extended by pool_size"""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
