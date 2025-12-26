@@ -141,6 +141,7 @@ def _remap_general_mistral_args(config: dict) -> dict:
         "n_layers": "num_hidden_layers",
         "n_heads": "num_attention_heads",
         "hidden_dim": "intermediate_size",
+        # "ragged_attention": "sliding_window",
     }
     # HF key -> (Mistral key, default value)
     top_level_mapping_with_default = {
@@ -158,6 +159,7 @@ def _remap_general_mistral_args(config: dict) -> dict:
     for new_key, (key, default_value) in top_level_mapping_with_default.items():
         config[new_key] = config.pop(key, default_value)
 
+    # config["sliding_window"] = 750
     return config
 
 
